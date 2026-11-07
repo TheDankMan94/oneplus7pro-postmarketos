@@ -1,0 +1,126 @@
+#!/usr/bin/python3
+# Charge-only mode.
+#
+# The OnePlus bootloader powers the phone on whenever a charger is attached
+# to a powered-off phone (androidboot.startupmode=dc_charger). Instead of
+# bringing up the full desktop, stay dark and charge: backlight off, no
+# login screen. Power key -> normal boot of the session. Charger unplugged
+# for 10 s -> real power off.
+#
+# Fails open: any error starts the normal desktop.
+import glob
+import os
+import select
+import struct
+import subprocess
+import sys
+import time
+
+FLAG = "/run/guacamole/charge-only"
+CHARGER_ONLINE = "/sys/class/power_supply/pm8150b-charger/online"
+UNPLUG_SECONDS = 10
+KEY_POWER = 116
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def find_input(name):
+    for path in glob.glob("/sys/class/input/event*/device/name"):
+        if read(path) == name:
+            return "/dev/input/" + path.split("/")[4]
+    return None
+
+
+def set_backlight(value):
+    for b in glob.glob("/sys/class/backlight/*/brightness"):
+        try:
+            with open(b, "w") as f:
+                f.write(str(value))
+        except OSError:
+            pass
+
+
+def saved_backlight():
+    for b in glob.glob("/sys/class/backlight/*/brightness"):
+        v = read(b)
+        if v is not None:
+            return v
+    return None
+
+
+def start_session():
+    try:
+        os.remove(FLAG)
+    except OSError:
+        pass
+    subprocess.run(["systemctl", "start", "--no-block", "display-manager.service"], check=False)
+
+
+def greetd_is_display_manager():
+    # Only hold the screen back when greetd (Phosh) is the login manager.
+    # With another one (e.g. tinydm for Lomiri) do nothing.
+    try:
+        return "greetd" in os.path.realpath("/etc/systemd/system/display-manager.service")
+    except OSError:
+        return True
+
+
+def main():
+    if not greetd_is_display_manager():
+        print("guacamole-charge-only: greetd is not the display manager, nothing to do", flush=True)
+        try:
+            os.remove(FLAG)
+        except OSError:
+            pass
+        return
+    old = saved_backlight()
+    subprocess.run(["plymouth", "quit"], check=False)
+    set_backlight(0)
+
+    dev = find_input("pm8941_pwrkey")
+    if not dev:
+        print("guacamole-charge-only: power key not found, starting session", flush=True)
+        if old:
+            set_backlight(old)
+        start_session()
+        return
+
+    fd = os.open(dev, os.O_RDONLY)
+    size = struct.calcsize("llHHi")
+    unplugged = 0
+    print("guacamole-charge-only: charging, screen off", flush=True)
+    while True:
+        r, _, _ = select.select([fd], [], [], 2.0)
+        if r:
+            data = os.read(fd, size)
+            if len(data) == size:
+                _, _, etype, code, value = struct.unpack("llHHi", data)
+                if etype == 1 and code == KEY_POWER and value == 1:
+                    print("guacamole-charge-only: power key, starting session", flush=True)
+                    if old:
+                        set_backlight(old)
+                    start_session()
+                    return
+        online = read(CHARGER_ONLINE)
+        if online == "0":
+            unplugged += 2
+            if unplugged >= UNPLUG_SECONDS:
+                print("guacamole-charge-only: charger removed, powering off", flush=True)
+                subprocess.run(["systemctl", "poweroff"], check=False)
+                time.sleep(60)
+                return
+        else:
+            unplugged = 0
+
+
+try:
+    main()
+except Exception as exc:  # fail open
+    print("guacamole-charge-only: error %r, starting session" % (exc,), file=sys.stderr, flush=True)
+    start_session()

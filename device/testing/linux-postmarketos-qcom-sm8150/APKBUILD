@@ -1,0 +1,137 @@
+# Co-Maintainer: Viola Guerrera <guerrera.nicola@gmail.com>
+maintainer="Pan Ortiz <panjeoc@proton.me>"
+_flavor="postmarketos-qcom-sm8150"
+pkgname=linux-$_flavor
+pkgver=6.17.0
+pkgrel=27
+pkgdesc="Mainline Kernel fork for SM8150 devices"
+arch="aarch64"
+_carch="arm64"
+url="https://gitlab.com/sm8150-mainline/linux"
+license="GPL-2.0-only"
+options="!strip !check !tracedeps
+	pmb:cross-native
+	pmb:kconfigcheck-nftables
+	"
+makedepends="
+	bison
+	clang
+	findutils
+	flex
+	lld
+	llvm
+	openssl-dev
+	perl
+	postmarketos-installkernel
+	python3
+	"
+
+_tag="v$pkgver-sm8150"
+
+# Source
+source="
+	linux-$_tag.tar.gz::$url/-/archive/$_tag/linux-$_tag.tar.gz
+	config-$_flavor.$arch
+	0001-lid-switch-fix.patch
+	0002-enable-ufs.patch
+	0003-fix-llvm-build.patch
+	0004-drm-msm-enable-native-guacamole-dsc-panel.patch
+	0005-input-s6sy761-add-optional-reset-gpio.patch
+	0006-i2c-qcom-geni-fifo-mode.patch
+	0007-asoc-codecs-add-tfa9874-speaker-amplifier-driver.patch
+	0008-asoc-sm8150-add-quaternary-mi2s-speaker-backend.patch
+	0009-ath10k-wcn3990-skip-quiet-mode.patch
+	0010-ufs-qcom-cap-sm8150-at-hs-g3.patch
+	0011-power-supply-qcom-smbx-smb5-limits-and-aicl.patch
+	0012-power-supply-bq27xxx-report-full-only-while-supplied.patch
+	0013-net-ipa-add-ipa-v4.1-platform-data.patch
+	0014-net-ipa-add-ipa-v4.1-register-definitions.patch
+	0015-net-ipa-bound-gsi-trans-commit-wait.patch
+	0016-net-ipa-v4.1-endp-init-ctrl.patch
+	0017-misc-fastrpc-allocate-sensors-messages-from-the-reserved-pool.patch
+	0018-power-supply-qcom-smbx-select-usb3-sdp-current.patch
+	0019-power-supply-qcom-smbx-expose-input-current-limit.patch
+	0020-power-supply-qcom-smbx-continuous-5v-to-12v-input-window.patch
+	0021-usb-typec-qcom-pmic-typec-count-vbus-above-vsafe0v-as-present.patch
+	0022-power-supply-qcom-smbx-follow-the-type-c-source-current-limit.patch
+	0023-usb-typec-qcom-pmic-typec-log-port-status-on-vbus-irq.patch
+	0024-usb-typec-qcom-pmic-typec-exit-the-sink-state-on-cc-only.patch
+	0025-power-reset-msm-poweroff-add-poweroff-only-ps-hold.patch
+	0026-input-misc-add-aw8697-haptics-driver.patch
+"
+builddir="$srcdir/linux-$_tag"
+
+prepare() {
+	default_prepare
+	cp "$srcdir/config-$_flavor.$arch" .config
+}
+
+build() {
+	unset LDFLAGS
+	make ARCH="$_carch" LLVM=1 \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-$_flavor"
+}
+
+package() {
+	if [ -e "$builddir/arch/$_carch/boot/vmlinuz.efi" ]; then
+		# ZBOOT EFI decompressor for EFI booting
+		install -Dm644 "$builddir/arch/$_carch/boot/vmlinuz.efi" \
+			"$pkgdir/boot/linux.efi"
+
+		# Old GZIP'd kernel image for boot.img compatibility
+		install -Dm644 "$builddir/arch/$_carch/boot/vmlinuz" \
+			"$pkgdir/boot/vmlinuz"
+	else
+		echo "WARNING: CONFIG_ZBOOT not enabled!"
+		install -Dm644 "$builddir/arch/$_carch/boot/Image.gz" \
+			"$pkgdir/boot/vmlinuz"
+	fi
+
+	make modules_install dtbs_install \
+		ARCH="$_carch" \
+		LLVM=1 \
+		INSTALL_PATH="$pkgdir"/boot/ \
+		INSTALL_MOD_PATH="$pkgdir" \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs-tmp
+
+	mkdir -p "$pkgdir"/boot/dtbs/qcom
+	cp -r "$pkgdir"/boot/dtbs-tmp/qcom/sm8150* "$pkgdir"/boot/dtbs/qcom
+	rm -rf "$pkgdir"/boot/dtbs-tmp
+
+	rm -f "$pkgdir"/lib/modules/*/build "$pkgdir"/lib/modules/*/source
+
+	install -D "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+}
+
+sha512sums="
+274270bb0391bca972b1dffae778ff6fc372457b658e9252104d9894c9f24739e25df7021378cf0ac9c650cc417d0cdcdf1baa88bfdcd494920ee183298e1f34  linux-v6.17.0-sm8150.tar.gz
+52ec79d88b0c4621400e721fb82f5d4d37f8a224fc206506549419a7d9c19f222720187d6d9cecc86709d11851d12844eda6f5da660d13e2b0e2ea6a392ba148  config-postmarketos-qcom-sm8150.aarch64
+15422195814314d8f9ce905408d1256bec753ca1b58babc59391c4cb8b4fbbc9034c622129d52964ccceb39e6f4326f0eae5ca9271496e1a0432416ecd09cc1d  0001-lid-switch-fix.patch
+316decafef4528b3d8fa9ce1f2c1588048ae0a99adf088d61372d84ff95ae7bf58e5cc0d03d73201f1735f3d523468d98113ac575714930229434a46385a5c3d  0002-enable-ufs.patch
+61653196d559a725e372597f7a2d8da4f308bc14c610fce6ecc982fab25757dd37a684480b32c1b05547144c1ec14000f6ddf542c605894edb68e7484d40fbf1  0003-fix-llvm-build.patch
+7276f32ca64653af23b915fa296bbcc088aeff061875d6627255e516f522ac52d897dc490a880d9bf8b611b2cee6efed6ac91e3dcb8ec750b5c1024de52b704e  0004-drm-msm-enable-native-guacamole-dsc-panel.patch
+d7177b77992d5b8d35fc1129422263195bc7a704ffef34d4dd100b1d70aa6b1657288a27640380bf53904cbad69ce1febd49f733694e92ae4d6dcf12a83fadd9  0005-input-s6sy761-add-optional-reset-gpio.patch
+e5da312d8c0e798f869026bd9a21d385c5dc9d2fbfc1f83f969651a2179aacc69f50661ebf0d2ee5533911b08d54e669daad19c963b0308061f8ff68d616d2f3  0006-i2c-qcom-geni-fifo-mode.patch
+af3dbf57c8052868f269440bbe9bdc9023cf51f626d7ede12599b41ec5b5c4895dd015bbf5981db463b0fab22efec8565131dbe4b453d5bf82f1732b1f7b9647  0007-asoc-codecs-add-tfa9874-speaker-amplifier-driver.patch
+7455a40ce9df41e4d78ccede2fb8875222caaa689bf4541c7ee89d248d914328a815ee4d912299c874fef80ac81960fde8e811f6df9a7ffc4bf7106a92a74ac0  0008-asoc-sm8150-add-quaternary-mi2s-speaker-backend.patch
+7bf90e9d88e6aa3f06d10961c8960c338e526b90421432bdda8de27f81ea562c27b4c22a003b50f3c91bef0c60ea3c739ab3b59203c5d7ad2b21f1811fc340d9  0009-ath10k-wcn3990-skip-quiet-mode.patch
+f1544115b86d522f0b8b537436316d87ecfbf2e508d8a1ea6ec851088e4978f50ba04c02bf1ab9182958c2ce31d6ed9b1ab7c24e4f21443bbd6ca0740806c3be  0010-ufs-qcom-cap-sm8150-at-hs-g3.patch
+bf0a3c23a6b316487a79c5637d2437d539c430658d04703d8fb4cd9c54d75f4f24272b0f7dd971eda199f00ed3de6efb513fbc365d8cd911c7374a9d768acf77  0011-power-supply-qcom-smbx-smb5-limits-and-aicl.patch
+acaf8fd0728f14d2540c2f9f8cf0b6563a5df2a31aaf5c2dfa2122348ad6465f1b76fab701507c2c29678ad9024c8f12ac9a2a9c92c5ddbc4a74d42f0fac7cfb  0012-power-supply-bq27xxx-report-full-only-while-supplied.patch
+7bd5540b3bcf7f41582ca177edb27cdd7db01409c15fc3d536d2e303047b990c7d07fd1e8622717d98a18a32872323b600bcdfecf4637959ecedddf323391676  0013-net-ipa-add-ipa-v4.1-platform-data.patch
+cbba23a302209890f06884dce26c792dc71af8a8817b6ab85898a474b9aea0d736dfaf9a08411d41a08ccc72f2e4261f64372ab14903768fb7d3886989d8821d  0014-net-ipa-add-ipa-v4.1-register-definitions.patch
+ca71b6c960f8d13d529ef4966a031aee8c2fc755ee6545596578ad76719e0edde62ba8748d6ec7517ba57a39572beeca350fd2b4c883b1d3b48cbb490aa983bb  0015-net-ipa-bound-gsi-trans-commit-wait.patch
+8e086382ba2381dc5d23234648b20836770b025bec196a745e177cae35bf959d22488558127dbe57dfb13697e5bdcdae6353bbc990b3bdf29f8526851d2919fd  0016-net-ipa-v4.1-endp-init-ctrl.patch
+b94243216bd03d7871927790da475443a82d6a207c60f6c6fb0c8cd7218df6fa09bcce4c29a5e9b52ab2cefc842dcacb4f1fb6bb66544d7cda0bed0dd6cbe013  0017-misc-fastrpc-allocate-sensors-messages-from-the-reserved-pool.patch
+13fc0b078dd3c660da68540963f2080d72d4ca8575602759bfc95376c4fe348b1f93d22bb4bad452b5de3b83c72f6153837d0479d16854eec9f1f520bea2a160  0018-power-supply-qcom-smbx-select-usb3-sdp-current.patch
+36df98e9bbe6cfa27f509c4f67c9f6325b68c2f7270baf3fe5873a9c82487e73d342c3a92a94f89b67037540201e77ba5b63f6c875c10d9e7b05d2a8bc92331d  0019-power-supply-qcom-smbx-expose-input-current-limit.patch
+fa0e249ae86f782b24baa0a4d17105d2098177909a109a004b7591df8edcc7a938cc6e9dc5506677c482ff8a9079eee808a332ccd167efcca96af918f7b6c053  0020-power-supply-qcom-smbx-continuous-5v-to-12v-input-window.patch
+d7be0ca8533c3ae01a68ab6b5face782c4aa22f71244e4b802069fce7a0f73a8ec22322ed9ff0bb1855231a7754803e2bff9091e4de35612492b7391262ad249  0021-usb-typec-qcom-pmic-typec-count-vbus-above-vsafe0v-as-present.patch
+1bdc1dd5e1e6ed7101dfb538c05686e51d83f398dd2a4fc26631c2525a930a910c4715538f33ae7eef46283da212456546a20f8365d75464ba81f5d78d06802a  0022-power-supply-qcom-smbx-follow-the-type-c-source-current-limit.patch
+da931db441637e9c8d8c1790ee67df0a18680de9ed5d9d519fdd7213ef6d191707e23dbfe88e28e712a6be43a4e5d2b4641f15726111751bb3619fb5eb934e69  0023-usb-typec-qcom-pmic-typec-log-port-status-on-vbus-irq.patch
+a98becf1c7bc9314c5dca98e0b1920068c448ae635d0951d90d721784eb2f500cf0b9368beb8c8827550114d7116906996c0fdd8948a4920d48eadbfe1a21180  0024-usb-typec-qcom-pmic-typec-exit-the-sink-state-on-cc-only.patch
+dfbf3caf0bf18be60648f95158cf51998311a542a9dfe5327632f73be087ddc034c1c487fb66c542f4dd84d35fcada22e79a5b3acc29e2acd9d24136d0f4e56e  0025-power-reset-msm-poweroff-add-poweroff-only-ps-hold.patch
+21d54fa891696f26bf98eb8092d94ce8cb694a0a65717ace04bf877de6f7f9a543f9bd895ee873d3fa35a512a7427d0432a60e43a5275cf9928b69d1eefd08b2  0026-input-misc-add-aw8697-haptics-driver.patch
+"

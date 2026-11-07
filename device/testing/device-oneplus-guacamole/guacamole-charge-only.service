@@ -1,0 +1,13 @@
+[Unit]
+Description=Charge-only mode (charger-started boot)
+ConditionKernelCommandLine=androidboot.startupmode=dc_charger
+Before=greetd.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'mkdir -p /run/guacamole && touch /run/guacamole/charge-only'
+ExecStart=/usr/libexec/guacamole-charge-only
+ExecStopPost=/bin/rm -f /run/guacamole/charge-only
+
+[Install]
+WantedBy=multi-user.target

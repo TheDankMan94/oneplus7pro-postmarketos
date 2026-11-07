@@ -1,0 +1,227 @@
+# Reference: <https://postmarketos.org/devicepkg>
+# Co-Maintainer: Uclydde <julianbraha@gmail.com>
+maintainer="Casey Connolly <kcxt@postmarketos.org>"
+pkgname=device-oneplus-guacamole
+pkgdesc="OnePlus 7 Pro"
+pkgver=4
+pkgrel=16
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck !strip !tracedeps"
+depends="
+	firmware-oneplus-guacamole
+	linux-postmarketos-qcom-sm8150
+	mkbootimg
+	alsa-ucm-conf
+	bluez-btmgmt
+	e2fsprogs-extra
+	hexagonrpcd
+	hexagonrpcd-systemd
+	hexagonrpcd-udev
+	iio-sensor-proxy
+	postmarketos-base
+	msm-modem
+	rmtfs
+	tqftpserv
+"
+makedepends="devicepkg-dev"
+# Sensor DSP support files read from a OnePlus 7 Pro's stock partitions
+# (vendor_b sensor config, dsp_b SLPI libraries, persist registry snapshot).
+# Not downloadable: generate it next to this APKBUILD with
+#   by copying the vendor sensor files out of your own phone's stock partitions
+_sensors="guacamole-sensors-20261014"
+subpackages="$pkgname-openrc"
+source="
+	deviceinfo
+	$pkgname-openrc.post-install
+	guacamole-mpss.initd
+	guacamole-chgctrl.initd
+	guacamole-chgctrl.daemon
+	guacamole-chgctrl.confd
+	guacamole-chgctrl.service
+	80-guacamole.preset
+	sxmo_deviceprofile-oneplus-guacamole.sh
+	90-wifi-wowlan.conf
+	90-ath10k-wowlan.rules
+	10-wifi-wowlan
+	HiFi.conf
+	guacamole.conf
+	guacamole-bdaddr
+	guacamole-bdaddr.service
+	90-guacamole-bdaddr.rules
+	guacamole-wlanmac
+	90-guacamole-wlanmac.rules
+	90-guacamole-sensors.rules
+	72-guacamole-haptics.rules
+	guacamole-slider
+	guacamole-slider.service
+	72-guacamole-slider.rules
+	guacamole-charge-only
+	guacamole-charge-only.service
+	greetd-charge-only.conf
+	61-guacamole-accel-mount-matrix.rules
+	guacamole-sensors-registry
+	guacamole-sensors-registry.service
+	iio-sensor-proxy-guacamole.conf
+	$_sensors.tar.gz
+"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+
+	# Enable WoWLAN (magic + disconnect) by default (NM connection default).
+	install -Dm644 "$srcdir/90-wifi-wowlan.conf" \
+		"$pkgdir/usr/lib/NetworkManager/conf.d/90-wifi-wowlan.conf"
+
+	# Force the Wi-Fi device wakeup-capable bit on so WoWLAN can wake from s2idle.
+	install -Dm644 "$srcdir/90-ath10k-wowlan.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/90-ath10k-wowlan.rules"
+
+	# Deterministically arm wake-on-wlan on the active Wi-Fi profile.
+	install -Dm755 "$srcdir/10-wifi-wowlan" \
+		"$pkgdir/etc/NetworkManager/dispatcher.d/10-wifi-wowlan"
+
+	# ALSA UCM: TFA9874 speakers on QUAT_MI2S_RX, handset mic on SLIMBUS_0_TX.
+	install -Dm644 "$srcdir/HiFi.conf" \
+		"$pkgdir/usr/share/alsa/ucm2/OnePlus/guacamole/HiFi.conf"
+	install -Dm644 "$srcdir/guacamole.conf" \
+		"$pkgdir/usr/share/alsa/ucm2/conf.d/sm8150/OnePlus 7 Pro.conf"
+
+	# Bluetooth: stable public address derived from the factory Wi-Fi MAC.
+	install -Dm755 "$srcdir/guacamole-bdaddr" "$pkgdir/usr/libexec/guacamole-bdaddr"
+	install -Dm644 "$srcdir/guacamole-bdaddr.service" \
+		"$pkgdir/usr/lib/systemd/system/guacamole-bdaddr.service"
+	install -Dm644 "$srcdir/90-guacamole-bdaddr.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/90-guacamole-bdaddr.rules"
+
+	# Wi-Fi: factory MAC as the interface address (NetworkManager still
+	# applies its per-network stable MAC while connected).
+	install -Dm755 "$srcdir/guacamole-wlanmac" "$pkgdir/usr/libexec/guacamole-wlanmac"
+	install -Dm644 "$srcdir/90-guacamole-wlanmac.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/90-guacamole-wlanmac.rules"
+
+	# Vibration motor for feedbackd
+	install -Dm644 "$srcdir/72-guacamole-haptics.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/72-guacamole-haptics.rules"
+
+	# Alert slider -> feedbackd profile (user service, enabled for every login)
+	install -Dm755 "$srcdir/guacamole-slider" "$pkgdir/usr/libexec/guacamole-slider"
+	install -Dm644 "$srcdir/guacamole-slider.service" \
+		"$pkgdir/usr/lib/systemd/user/guacamole-slider.service"
+	install -d "$pkgdir/usr/lib/systemd/user/default.target.wants"
+	ln -sf ../guacamole-slider.service \
+		"$pkgdir/usr/lib/systemd/user/default.target.wants/guacamole-slider.service"
+	install -Dm644 "$srcdir/72-guacamole-slider.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/72-guacamole-slider.rules"
+
+	# Charge-only mode for charger-started boots
+	install -Dm755 "$srcdir/guacamole-charge-only" "$pkgdir/usr/libexec/guacamole-charge-only"
+	install -Dm644 "$srcdir/guacamole-charge-only.service" \
+		"$pkgdir/usr/lib/systemd/system/guacamole-charge-only.service"
+	install -d "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
+	ln -sf ../guacamole-charge-only.service \
+		"$pkgdir/usr/lib/systemd/system/multi-user.target.wants/guacamole-charge-only.service"
+	install -Dm644 "$srcdir/greetd-charge-only.conf" \
+		"$pkgdir/usr/lib/systemd/system/greetd.service.d/20-guacamole-charge-only.conf"
+
+	# Charge policy (USB PD contract, DCP, thermal throttling, charge window)
+	install -Dm755 "$srcdir/guacamole-chgctrl.daemon" "$pkgdir/usr/libexec/guacamole-chgctrl"
+	install -Dm644 "$srcdir/guacamole-chgctrl.confd" "$pkgdir/etc/conf.d/guacamole-chgctrl"
+	install -Dm644 "$srcdir/guacamole-chgctrl.service" \
+		"$pkgdir/usr/lib/systemd/system/guacamole-chgctrl.service"
+	install -Dm644 "$srcdir/80-guacamole.preset" \
+		"$pkgdir/usr/lib/systemd/system-preset/80-guacamole.preset"
+
+	# Sensors: the SLPI sensor DSP is served its configuration, registry and
+	# libraries by hexagonrpcd from /usr/share/qcom. The registry is per unit
+	# and rewritten by the DSP, so it lives under /var/lib and is imported
+	# from persist on first boot by guacamole-sensors-registry.
+	local q="$pkgdir/usr/share/qcom" sd="$srcdir/$_sensors"
+	mkdir -p "$q/sensors" "$q/socinfo"
+	cp -r "$sd/sensors/config" "$q/sensors/config"
+	install -m644 "$sd/sensors/sns_reg.conf" "$q/sensors/sns_reg.conf"
+	cp -r "$sd/sdsp" "$q/sdsp"
+	printf MTP > "$q/socinfo/hw_platform"
+	printf 339 > "$q/socinfo/soc_id"
+	printf Unknown > "$q/socinfo/platform_subtype"
+	printf 0 > "$q/socinfo/platform_subtype_id"
+	printf 65536 > "$q/socinfo/platform_version"
+	printf 2.2 > "$q/socinfo/revision"
+	ln -s /var/lib/guacamole/sensors/registry "$q/sensors/registry"
+	ln -s /var/lib/guacamole/sensors/project_info "$q/project_info"
+	local f
+	for f in sns_reg_version file1 file2; do
+		ln -s "/var/lib/guacamole/sensors/$f" "$q/sensors/$f"
+	done
+	mkdir -p "$pkgdir/usr/share/guacamole/sensors-registry-default"
+	cp -r "$sd/registry-default/registry" \
+		"$pkgdir/usr/share/guacamole/sensors-registry-default/registry"
+	find "$q" "$pkgdir/usr/share/guacamole" -type f -exec chmod 644 {} +
+	install -Dm755 "$srcdir/guacamole-sensors-registry" \
+		"$pkgdir/usr/libexec/guacamole-sensors-registry"
+	install -Dm644 "$srcdir/guacamole-sensors-registry.service" \
+		"$pkgdir/usr/lib/systemd/system/guacamole-sensors-registry.service"
+	install -Dm644 "$srcdir/90-guacamole-sensors.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/90-guacamole-sensors.rules"
+	install -Dm644 "$srcdir/61-guacamole-accel-mount-matrix.rules" \
+		"$pkgdir/usr/lib/udev/rules.d/61-guacamole-accel-mount-matrix.rules"
+	install -Dm644 "$srcdir/iio-sensor-proxy-guacamole.conf" \
+		"$pkgdir/usr/lib/systemd/system/iio-sensor-proxy.service.d/guacamole.conf"
+}
+
+openrc() {
+	install_if="$pkgname=$pkgver-r$pkgrel openrc"
+	install="$subpkgname.post-install"
+	depends="tqftpserv-openrc openrc"
+	install -Dm755 "$srcdir/guacamole-mpss.initd" \
+		"$subpkgdir/etc/init.d/guacamole-mpss"
+	install -Dm755 "$srcdir/guacamole-chgctrl.initd" \
+		"$subpkgdir/etc/init.d/guacamole-chgctrl"
+	# sxmo looks up device profiles by the exact "vendor,codename" compatible
+	# string; abuild rejects commas in source= filenames, so the tracked file
+	# uses dashes and gets installed under the comma name sxmo expects.
+	install -Dm755 "$srcdir/sxmo_deviceprofile-oneplus-guacamole.sh" \
+		"$subpkgdir/usr/bin/sxmo_deviceprofile_oneplus,guacamole.sh"
+}
+
+
+
+sha512sums="
+927c74ae59c13d7d5c5e5acd5f88e876274ac03c29f677c009a572ea3f6da21ad5adfdf1e2e3cec84a990f8bbb5396122d8306440274e5faa351c1afe1e5df77  deviceinfo
+f97ee1223a887911aeb144bf0ab0c4a102d6d6c9a2a5ba7d4571c7b040196fb6acec848a460cda26b006806dc4e42f1da0c07d1fc47ed8b5be6e926fcb725ba6  device-oneplus-guacamole-openrc.post-install
+769e72e3f074f7515dfa3dd05fae88643fabfb2e6ed6c5f0b28fa5089e830bcbffeceb5a1d0c5ab41f809764261a20bc35074de59774606fc53c51e1a09a05fc  guacamole-mpss.initd
+9da8768a3c86029b90bd54b433b688d5c91410116cc00b6d9650ab15697e5ec0ff9e44b81d83b70cfac34187c2fac525ddea427a12d48ea0df8498597bc5d494  guacamole-chgctrl.initd
+28d025ced2d1f9d80f10ab48e5a200ad853992c8ec82033ed475c29d9615dc43e848c4c6586184d7d13846a0e6dcdbdaf5d7c6b9de0a251d5cdcec8f15dae33f  guacamole-chgctrl.daemon
+67167a447037b041d05e12191ce3e881c6c5e76e5a5a71f5914daccf048aa732bac8b33f48f861ec6460545e36835af0e9e85e2545a2f37e16cae4c51aed17b7  guacamole-chgctrl.confd
+450c485ba61fbe40ba3117ea3843af781928c59ab7a1b6298966c98c059633521d4ed796ce5854d1225713fd042e1db6b3a7ec9200758005b632ec34e71950b3  guacamole-chgctrl.service
+3fa6abde06c56dc48d354adea626af2d3347abf778a9ec12456f5313d9d7ccd00ca5a86103793fde5866930cc74ae2d8e9ce3f49685ea4d27844348d1e895244  80-guacamole.preset
+c32b679c7d9cc8745ab6ca538473fa46dc96122e2b99823fe54aed06701fb921708c4e2f9d115d1d6c01588c100deeb9f410fd80439b8b6ad6724b8d33b6a53e  sxmo_deviceprofile-oneplus-guacamole.sh
+7fe009a4b2389ac56e1ff4380dd7ce90b21e0a435ebd72615e9683c6959c35024e7d2d39f62156359f74043b2c2e6f3a4a84a95a7195b6cc9943e718d342c9c3  90-wifi-wowlan.conf
+940aedbb0a39179ecde436980b27762a3690009c60f9878b4ab0f54d81e7e3e35098cabbf664effdf9aafe835ce65228ebcf97766eb45081d9cbc2cdcd320020  90-ath10k-wowlan.rules
+09251783365a3c3128e794baee6e5f5bd7b543fc46c707c558519e81f2efa71d2d2223cca321e243a0887beeab1460577d0081e2d3bdd8d78930a4b4512c5ea2  10-wifi-wowlan
+859501fa18311f1cea9f9c6231046d2eab7d15f031e9970e0ddb5ba8f875d2f135dbdbb62543c0df4304ee552f827efd15fc8299007115e15ca6a8fdaabfed1f  HiFi.conf
+b3dc15594284308d6d413d0b54d7d24246514e747eaf1b39999c417a5340b243ce4e7d3d250cc8134ab7ea02e6261c6d0b43b2bdc693370fb7ba9e2d31247bbc  guacamole.conf
+7d4835de1bc31febcaec42267be596bc8e34f57b6c0e14420e61ee42b265224581bd45d4c2dd5e93528a649525e34061b01a277949b53b98c14f1a32fe8e210e  guacamole-bdaddr
+0a475cbb04f25cd09c943deed6109cf0a9367ceda57284b18a6ce80402f9cd802f352bca06df5305cc64b5845149c09804dd44604aab31dfb090dea29befb5a7  guacamole-bdaddr.service
+2a1b701c9efb5281e2db68932a9d832421fdfa6272094f6aa184c2959cee3370b8725e4c07c671b555a2a4021740ceab7b62ebf119b702ef810c848664c9116f  90-guacamole-bdaddr.rules
+c73217fdfe3b2463c69d3df75a02c94575222f946e61685a43783bb26dffa4a8c71a2e36b8fad9ba2248938c1652e9d42ec4346692fde1bef2eff56df05788d8  guacamole-wlanmac
+be1a5cb1c37b8ddda6b8d5cce2dd3596be44fefed67c75493abd4ad15d5041601493a0d9f2823b67825d2940f11b36274f05ebf8ce0113bd42e972aac20ad187  90-guacamole-wlanmac.rules
+722313af8488dd1e0e19ceed62e002ebb6c09315078d5b2b4730e6084c25c1165049b3a85efdb156a756d06b6387c9d31d5fda280b106bccb003bab54bba99f8  90-guacamole-sensors.rules
+8cf53420e17cf45cddffadbda1ad0819f6fbf93848c49e2ba40ea831fa6dee463c74e149005913eae60e39137c10e892e715fa560205991d8d3744a6f6861193  72-guacamole-haptics.rules
+db2dd913970ae1ad468a7b0191e14d5c5914595663ff0e815c10c358285b6e099dbb727aa7d0528be354defc213feebe63a3dccd2ae072f083bb1211c6addb93  guacamole-slider
+bc131cbea96917270a365ead56a834fe43124cf43d0e9e5708bbc3e577a81025eafce1643417c8c4342c2920c3c7c4c922794dbba9da079b2412b81a0baba3f4  guacamole-slider.service
+0eba6ac68a473d345b0d3a51b977c429005a6715df23116573c597882546f5531cdb22b75177119c43477f0a22990700b09be5d38cd6db7573732fb3e2214533  72-guacamole-slider.rules
+00985ed43bb90c4ef610db5cefd4b8fd918ae04e08db4174e12091491610ded9a53971fbf0dbe6d0bc4e6e2d865af5ac048779bbb01f5c383960f907e390b15e  guacamole-charge-only
+0bad09d9144647d09307e52dde4bb443bd935879521b0e64e8235765fa8bdb94282503ba330582823745a7b2ce758e0564630e7c5990e26be3d0873f51346776  guacamole-charge-only.service
+92d2fada5b5658776407c365c3b989008777ea539b5eace678430f91382df58de7e93a867ad996a0c212636af039206da0fd486aaec9d7617d26608392e163c7  greetd-charge-only.conf
+d0a84b5aa02540f3187b92f5c96fac8f5af07b0c3532a32e63eb75614a76b7ad62b166bc2551c2fab68405446bff0a03b3e6f7c7ab1e2e99dafc070a628046ff  61-guacamole-accel-mount-matrix.rules
+1e2b796d12b35c224919a2a0c8bdf263b5f3fe7f63ce0e764b9602816171909764407ce3e5af2fac80d53eb30ca41587a8a3f261b7d4851d3b8931fc84809c7d  guacamole-sensors-registry
+81cf37c601c90e6b208bfcb1dac19d11ec553681958fc2a8ef7f75343a784a7f323e7fefd95780c6e14b0ec0076ac2e2d4a7f43c301d5ddbec8451e070d7504c  guacamole-sensors-registry.service
+6aaa3a7da243fe9ab85065f7894e6bde4004a0ed88714ac06d137804e49426820cb78c4d27137cf6c9e885b6511082a572e76096c6624d541ef6a667b4eadea1  iio-sensor-proxy-guacamole.conf
+a344ed0d7a24a67a8ed222f7cf4991ca29ec195f8e0b69c48e91f75281e1543043b18e462ca2a396c8428bde014f605e284e5358020ca782813364e2fc232193  guacamole-sensors-20261014.tar.gz
+"

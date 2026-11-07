@@ -1,0 +1,10 @@
+[Unit]
+Description=OnePlus 7 Pro alert slider to feedbackd profile
+
+[Service]
+ExecStart=/usr/libexec/guacamole-slider
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

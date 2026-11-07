@@ -1,0 +1,61 @@
+#!/usr/bin/python3
+# Alert slider -> feedbackd profile.
+#
+# The slider is a gpio-keys device reporting KEY_F13/F14/F15 (one held at a
+# time). Physical positions measured on the OnePlus 7 Pro:
+#   top    = 185 (KEY_F15)  -> full   (ring)
+#   middle = 184 (KEY_F14)  -> quiet  (vibrate only)
+#   bottom = 183 (KEY_F13)  -> silent
+import fcntl
+import glob
+import os
+import struct
+import subprocess
+import sys
+
+EVIOCGKEY = 0x80604518
+PROFILES = {185: "full", 184: "quiet", 183: "silent"}
+
+
+def find_device():
+    for path in glob.glob("/sys/class/input/event*/device/name"):
+        with open(path) as f:
+            if f.read().strip() == "alert-slider":
+                return "/dev/input/" + path.split("/")[4]
+    return None
+
+
+def held(fd):
+    buf = bytearray(96)
+    fcntl.ioctl(fd, EVIOCGKEY, buf)
+    for code in PROFILES:
+        if buf[code // 8] & (1 << (code % 8)):
+            return code
+    return None
+
+
+def apply(code):
+    profile = PROFILES.get(code)
+    if profile:
+        subprocess.run(["gsettings", "set", "org.sigxcpu.feedbackd", "profile", profile],
+                       check=False)
+
+
+def main():
+    dev = find_device()
+    if not dev:
+        sys.exit("guacamole-slider: alert-slider input device not found")
+    fd = os.open(dev, os.O_RDONLY)
+    apply(held(fd))
+    size = struct.calcsize("llHHi")
+    while True:
+        data = os.read(fd, size)
+        if len(data) != size:
+            continue
+        _, _, etype, code, value = struct.unpack("llHHi", data)
+        # a line going active means the slider arrived at that position
+        if etype == 1 and value == 1:
+            apply(code)
+
+
+main()

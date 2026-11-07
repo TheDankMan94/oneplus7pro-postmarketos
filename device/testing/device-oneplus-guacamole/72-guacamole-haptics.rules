@@ -1,0 +1,4 @@
+# Let feedbackd use the Awinic AW8697 vibration motor (kernel patch 0026).
+ACTION=="remove", GOTO="guacamole_haptics_end"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT}=="1", SUBSYSTEMS=="input", ATTRS{name}=="aw8697-haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
+LABEL="guacamole_haptics_end"

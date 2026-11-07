@@ -1,0 +1,46 @@
+#!/bin/sh
+# Give the WCN3990 Bluetooth controller a stable public address.
+#
+# The controller has no programmed address and the bootloader does not pass
+# local-bd-address, so the kernel registers it as unconfigured and BlueZ ignores
+# it. Derive the address from the factory Wi-Fi MAC on the persist partition
+# (last byte + 1), cache it, and set it through the management interface.
+set -e
+
+state=/var/lib/guacamole/bdaddr
+
+if [ ! -s "$state" ]; then
+	mnt=$(mktemp -d)
+	mount -o ro,noload /dev/disk/by-partlabel/persist "$mnt" 2>/dev/null ||
+		mount -o ro /dev/disk/by-partlabel/persist "$mnt"
+	mac=$(sed -n 's/^Intf0MacAddress=//p' "$mnt/wlan_mac.bin" | tr -d '\r\n')
+	umount "$mnt"
+	rmdir "$mnt"
+
+	case "$mac" in
+	[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;;
+	*)
+		# No factory address on this unit (persist/wlan_mac.bin is empty):
+		# make a random locally administered one once and keep it.
+		echo "guacamole-bdaddr: no Wi-Fi MAC in persist, generating a random address" >&2
+		mac=$(od -An -N5 -tx1 /dev/urandom | tr -d ' \n' | tr a-f A-F)
+		mac="02$mac" ;;
+	esac
+
+	head=$(echo "$mac" | cut -c1-10)
+	last=$(printf '%02X' $(( (0x$(echo "$mac" | cut -c11-12) + 1) & 0xff )))
+	mkdir -p "${state%/*}"
+	echo "$head$last" | sed -E 's/(..)/\1:/g; s/:$//' > "$state"
+fi
+
+# Only an unconfigured controller accepts a new public address. udev starts
+# this as soon as hci0 appears, before the QCA firmware download finishes and
+# the controller reports the missing address, so wait for that (up to 20 s).
+i=0
+while [ $i -lt 40 ]; do
+	if btmgmt --index 0 config 2>/dev/null | grep -q 'missing options:.*public-address'; then
+		exec btmgmt --index 0 public-addr "$(cat "$state")"
+	fi
+	sleep 0.5
+	i=$((i + 1))
+done

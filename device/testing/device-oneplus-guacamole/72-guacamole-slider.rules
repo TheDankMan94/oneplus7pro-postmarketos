@@ -1,0 +1,4 @@
+# Let the logged-in user read the alert slider.
+ACTION=="remove", GOTO="guacamole_slider_end"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="alert-slider", TAG+="uaccess"
+LABEL="guacamole_slider_end"

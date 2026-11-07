@@ -1,0 +1,421 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] Input: misc: add a minimal Awinic AW8697 haptics driver
+
+Rumble-only force-feedback driver for the AW8697 LRA haptic chip used on the
+OnePlus 7 Pro. Register programming follows the vendor driver (GPL-2.0).
+---
+--- a/drivers/input/misc/Kconfig	2025-10-27 20:03:05.000000000 -0400
++++ b/drivers/input/misc/Kconfig	2026-11-07 11:04:06.863660242 -0500
+@@ -901,6 +901,19 @@
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called drv2667-haptics.
+ 
++config INPUT_AW8697_HAPTICS
++	tristate "Awinic AW8697 haptics support"
++	depends on INPUT && I2C
++	depends on GPIOLIB || COMPILE_TEST
++	select INPUT_FF_MEMLESS
++	select REGMAP_I2C
++	help
++	  Say Y to enable support for the Awinic AW8697 LRA haptic driver
++	  used on the OnePlus 7 Pro (rumble effects only).
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called aw8697-haptics.
++
+ config INPUT_HISI_POWERKEY
+ 	tristate "Hisilicon PMIC ONKEY support"
+ 	depends on ARCH_HISI || COMPILE_TEST
+--- a/drivers/input/misc/Makefile	2025-10-27 20:03:05.000000000 -0400
++++ b/drivers/input/misc/Makefile	2026-11-07 11:04:06.863904333 -0500
+@@ -38,6 +38,7 @@
+ obj-$(CONFIG_INPUT_DRV260X_HAPTICS)	+= drv260x.o
+ obj-$(CONFIG_INPUT_DRV2665_HAPTICS)	+= drv2665.o
+ obj-$(CONFIG_INPUT_DRV2667_HAPTICS)	+= drv2667.o
++obj-$(CONFIG_INPUT_AW8697_HAPTICS)	+= aw8697-haptics.o
+ obj-$(CONFIG_INPUT_GPIO_BEEPER)		+= gpio-beeper.o
+ obj-$(CONFIG_INPUT_GPIO_DECODER)	+= gpio_decoder.o
+ obj-$(CONFIG_INPUT_GPIO_VIBRA)		+= gpio-vibra.o
+--- /dev/null	2026-11-07 14:47:00.212660252 -0500
++++ b/drivers/input/misc/aw8697-haptics.c	2026-11-07 11:04:06.868213517 -0500
+@@ -0,0 +1,380 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Awinic AW8697 LRA haptic driver (minimal force-feedback rumble)
++ *
++ * Register programming follows the vendor driver for the OnePlus 7 Pro
++ * (LineageOS android_kernel_oneplus_sm8150, drivers/misc/aw8697_haptic,
++ * GPL-2.0, Copyright Awinic). Only the "continuous" play mode is used: a
++ * rumble effect runs the actuator at its resonance until it is stopped.
++ *
++ * The tuning values are the vendor defaults for the 170 Hz actuator used by
++ * the OnePlus 7 Pro (project 18821 / device id 619).
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define AW8697_CHIPID			0x97
++
++#define AW8697_REG_ID			0x00
++#define AW8697_REG_SYSINT		0x02
++#define AW8697_REG_SYSINTM		0x03
++#define AW8697_REG_SYSCTRL		0x04
++#define AW8697_REG_GO			0x05
++#define AW8697_REG_DATCTRL		0x2b
++#define AW8697_REG_PWMPRC		0x2d
++#define AW8697_REG_PWMDBG		0x2e
++#define AW8697_REG_BSTDBG1		0x31
++#define AW8697_REG_BSTDBG2		0x32
++#define AW8697_REG_BSTDBG3		0x33
++#define AW8697_REG_BSTCFG		0x34
++#define AW8697_REG_ANADBG		0x35
++#define AW8697_REG_DATDBG		0x39
++#define AW8697_REG_BSTDBG4		0x3a
++#define AW8697_REG_PRLVL		0x3e
++#define AW8697_REG_GLB_STATE		0x46
++#define AW8697_REG_BST_AUTO		0x47
++#define AW8697_REG_CONT_CTRL		0x48
++#define AW8697_REG_F_PRE_H		0x49
++#define AW8697_REG_F_PRE_L		0x4a
++#define AW8697_REG_TD_H			0x4b
++#define AW8697_REG_TD_L			0x4c
++#define AW8697_REG_TSET			0x4d
++#define AW8697_REG_TRIM_LRA		0x5b
++#define AW8697_REG_R_SPARE		0x5d
++#define AW8697_REG_DETCTRL		0x5f
++#define AW8697_REG_ADCTEST		0x66
++#define AW8697_REG_ZC_THRSH_H		0x72
++#define AW8697_REG_ZC_THRSH_L		0x73
++#define AW8697_REG_BEMF_VTHH_H		0x74
++#define AW8697_REG_BEMF_VTHH_L		0x75
++#define AW8697_REG_BEMF_VTHL_H		0x76
++#define AW8697_REG_BEMF_VTHL_L		0x77
++#define AW8697_REG_BEMF_NUM		0x78
++#define AW8697_REG_TIME_NZC		0x7a
++#define AW8697_REG_DRV_LVL		0x7b
++#define AW8697_REG_DRV_LVL_OV		0x7c
++#define AW8697_REG_MAX			0x7f
++
++#define SYSCTRL_STANDBY			BIT(0)
++#define SYSCTRL_BST_BOOST		BIT(1)
++#define SYSCTRL_PLAY_MODE		GENMASK(3, 2)
++#define SYSCTRL_PLAY_MODE_CONT		(2 << 2)
++#define SYSCTRL_RAMINIT			BIT(5)
++
++#define SYSINTM_UVLO_OFF		BIT(5)
++#define GO_ENABLE			BIT(0)
++#define DATCTRL_FC			GENMASK(7, 6)
++#define DATCTRL_FC_1000HZ		(3 << 6)
++#define DATCTRL_LPF_ENABLE		BIT(5)
++#define PWMPRC_PRC_ENABLE		BIT(7)
++#define PWMDBG_PWM_MODE			GENMASK(6, 5)
++#define PWMDBG_PWM_24K			(2 << 5)
++#define BSTCFG_PEAKCUR			GENMASK(2, 0)
++#define BSTCFG_PEAKCUR_3P5A		5
++#define ANADBG_IOC			GENMASK(3, 2)
++#define ANADBG_IOC_4P65A		(3 << 2)
++#define BSTDBG4_BSTVOL			GENMASK(5, 1)
++#define DETCTRL_PROTECT_NO_ACTION	BIT(5)
++#define DETCTRL_DIAG_GO			BIT(0)
++#define PRLVL_PR_ENABLE			BIT(7)
++#define BST_AUTO_AUTOSW			BIT(2)
++#define ADCTEST_VBAT_HW_COMP		BIT(6)
++#define BEMF_NUM_BRK			GENMASK(3, 0)
++
++/* continuous mode: zero-cross detect, close-loop playback, auto brake */
++#define CONT_CTRL_VALUE			(BIT(7) | BIT(3) | BIT(0))
++
++/* vendor defaults for the 170 Hz actuator */
++#define AW8697_F0_PRE_HZ_X10		1700
++#define AW8697_F0_COEFF			260
++#define AW8697_CONT_DRV_LVL		60
++#define AW8697_CONT_DRV_LVL_OV		125
++#define AW8697_CONT_TD			0x009a
++#define AW8697_CONT_ZC_THR		0x0ff1
++#define AW8697_CONT_NUM_BRK		3
++#define AW8697_BST_VOL			0x18
++
++#define AW8697_GAIN_DEFAULT		0x80
++#define AW8697_GAIN_MIN			0x30
++
++struct aw8697 {
++	struct i2c_client *client;
++	struct regmap *regmap;
++	struct gpio_desc *reset_gpio;
++	struct input_dev *input;
++	struct work_struct play_work;
++	struct mutex lock;
++	u16 strength;
++};
++
++static const struct regmap_config aw8697_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = AW8697_REG_MAX,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int aw8697_stop(struct aw8697 *aw)
++{
++	unsigned int val;
++	int i;
++
++	regmap_update_bits(aw->regmap, AW8697_REG_GO, GO_ENABLE, 0);
++
++	/* wait for the chip to return to standby on its own */
++	for (i = 0; i < 100; i++) {
++		if (!regmap_read(aw->regmap, AW8697_REG_GLB_STATE, &val) &&
++		    !(val & 0x0f))
++			break;
++		msleep(2);
++	}
++
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSINTM, SYSINTM_UVLO_OFF,
++			   SYSINTM_UVLO_OFF);
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSCTRL, SYSCTRL_STANDBY,
++			   SYSCTRL_STANDBY);
++	return 0;
++}
++
++static int aw8697_base_init(struct aw8697 *aw)
++{
++	struct regmap *map = aw->regmap;
++	unsigned int val;
++	int i;
++
++	/* standby, 24 kHz PWM */
++	regmap_update_bits(map, AW8697_REG_SYSCTRL, SYSCTRL_STANDBY, SYSCTRL_STANDBY);
++	regmap_update_bits(map, AW8697_REG_PWMDBG, PWMDBG_PWM_MODE, PWMDBG_PWM_24K);
++
++	regmap_write(map, AW8697_REG_BSTDBG1, 0x30);
++	regmap_write(map, AW8697_REG_BSTDBG2, 0xeb);
++	regmap_write(map, AW8697_REG_BSTDBG3, 0xd4);
++	regmap_write(map, AW8697_REG_TSET, 0x12);
++	regmap_write(map, AW8697_REG_R_SPARE, 0x68);
++	regmap_update_bits(map, AW8697_REG_ANADBG, ANADBG_IOC, ANADBG_IOC_4P65A);
++	regmap_update_bits(map, AW8697_REG_BSTCFG, BSTCFG_PEAKCUR,
++			   BSTCFG_PEAKCUR_3P5A);
++
++	/* motor protection off (vendor default), manual boost */
++	regmap_update_bits(map, AW8697_REG_DETCTRL, DETCTRL_PROTECT_NO_ACTION,
++			   DETCTRL_PROTECT_NO_ACTION);
++	regmap_update_bits(map, AW8697_REG_PWMPRC, PWMPRC_PRC_ENABLE, 0);
++	regmap_update_bits(map, AW8697_REG_PRLVL, PRLVL_PR_ENABLE, 0);
++	regmap_update_bits(map, AW8697_REG_BST_AUTO, BST_AUTO_AUTOSW, 0);
++
++	/* oscillator calibration */
++	regmap_update_bits(map, AW8697_REG_SYSCTRL, SYSCTRL_RAMINIT, SYSCTRL_RAMINIT);
++	regmap_update_bits(map, AW8697_REG_DETCTRL, DETCTRL_DIAG_GO, DETCTRL_DIAG_GO);
++	for (i = 0; i < 2000; i++) {
++		if (regmap_read(map, AW8697_REG_DETCTRL, &val) || !(val & BIT(0)))
++			break;
++	}
++	regmap_update_bits(map, AW8697_REG_SYSCTRL, SYSCTRL_RAMINIT, 0);
++
++	regmap_update_bits(map, AW8697_REG_ADCTEST, ADCTEST_VBAT_HW_COMP,
++			   ADCTEST_VBAT_HW_COMP);
++
++	/* rewrite the trim value as the vendor reset path does */
++	if (!regmap_read(map, AW8697_REG_TRIM_LRA, &val))
++		regmap_write(map, AW8697_REG_TRIM_LRA, val);
++
++	return 0;
++}
++
++static void aw8697_play(struct aw8697 *aw, u16 strength)
++{
++	struct regmap *map = aw->regmap;
++	unsigned int f0_reg, gain, val;
++
++	gain = AW8697_GAIN_MIN +
++	       ((AW8697_GAIN_DEFAULT - AW8697_GAIN_MIN) * strength) / 0xffff;
++
++	aw8697_stop(aw);
++
++	regmap_write(map, AW8697_REG_DATDBG, gain);
++	regmap_update_bits(map, AW8697_REG_BSTDBG4, BSTDBG4_BSTVOL,
++			   AW8697_BST_VOL << 1);
++
++	/* continuous play mode, boost bypass, then active */
++	regmap_update_bits(map, AW8697_REG_SYSCTRL, SYSCTRL_PLAY_MODE,
++			   SYSCTRL_PLAY_MODE_CONT);
++	regmap_update_bits(map, AW8697_REG_SYSCTRL, SYSCTRL_BST_BOOST, 0);
++	regmap_update_bits(map, AW8697_REG_SYSCTRL, SYSCTRL_STANDBY, 0);
++	regmap_read(map, AW8697_REG_SYSINT, &val);
++	regmap_update_bits(map, AW8697_REG_SYSINTM, SYSINTM_UVLO_OFF, 0);
++
++	/* preset f0 */
++	f0_reg = 1000000000 / (AW8697_F0_PRE_HZ_X10 * AW8697_F0_COEFF);
++	regmap_write(map, AW8697_REG_F_PRE_H, (f0_reg >> 8) & 0xff);
++	regmap_write(map, AW8697_REG_F_PRE_L, f0_reg & 0xff);
++
++	regmap_update_bits(map, AW8697_REG_DATCTRL, DATCTRL_FC, DATCTRL_FC_1000HZ);
++	regmap_update_bits(map, AW8697_REG_DATCTRL, DATCTRL_LPF_ENABLE,
++			   DATCTRL_LPF_ENABLE);
++
++	regmap_write(map, AW8697_REG_CONT_CTRL, CONT_CTRL_VALUE);
++	regmap_write(map, AW8697_REG_TD_H, AW8697_CONT_TD >> 8);
++	regmap_write(map, AW8697_REG_TD_L, AW8697_CONT_TD & 0xff);
++	regmap_write(map, AW8697_REG_TSET, 0x12);
++	regmap_write(map, AW8697_REG_ZC_THRSH_H, AW8697_CONT_ZC_THR >> 8);
++	regmap_write(map, AW8697_REG_ZC_THRSH_L, AW8697_CONT_ZC_THR & 0xff);
++	regmap_write(map, AW8697_REG_BEMF_VTHH_H, 0x10);
++	regmap_write(map, AW8697_REG_BEMF_VTHH_L, 0x08);
++	regmap_write(map, AW8697_REG_BEMF_VTHL_H, 0x03);
++	regmap_write(map, AW8697_REG_BEMF_VTHL_L, 0xf8);
++	regmap_update_bits(map, AW8697_REG_BEMF_NUM, BEMF_NUM_BRK,
++			   AW8697_CONT_NUM_BRK);
++	regmap_write(map, AW8697_REG_TIME_NZC, 0x23);
++	regmap_write(map, AW8697_REG_DRV_LVL, AW8697_CONT_DRV_LVL);
++	regmap_write(map, AW8697_REG_DRV_LVL_OV, AW8697_CONT_DRV_LVL_OV);
++
++	regmap_update_bits(map, AW8697_REG_GO, GO_ENABLE, GO_ENABLE);
++}
++
++static void aw8697_play_work(struct work_struct *work)
++{
++	struct aw8697 *aw = container_of(work, struct aw8697, play_work);
++	u16 strength;
++
++	mutex_lock(&aw->lock);
++	strength = aw->strength;
++	if (strength)
++		aw8697_play(aw, strength);
++	else
++		aw8697_stop(aw);
++	mutex_unlock(&aw->lock);
++}
++
++static int aw8697_play_effect(struct input_dev *dev, void *data,
++			      struct ff_effect *effect)
++{
++	struct aw8697 *aw = input_get_drvdata(dev);
++
++	if (effect->u.rumble.strong_magnitude)
++		aw->strength = effect->u.rumble.strong_magnitude;
++	else
++		aw->strength = effect->u.rumble.weak_magnitude;
++
++	schedule_work(&aw->play_work);
++	return 0;
++}
++
++static void aw8697_close(struct input_dev *dev)
++{
++	struct aw8697 *aw = input_get_drvdata(dev);
++
++	cancel_work_sync(&aw->play_work);
++	mutex_lock(&aw->lock);
++	aw8697_stop(aw);
++	mutex_unlock(&aw->lock);
++}
++
++static int aw8697_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct aw8697 *aw;
++	unsigned int id;
++	int ret;
++
++	aw = devm_kzalloc(dev, sizeof(*aw), GFP_KERNEL);
++	if (!aw)
++		return -ENOMEM;
++
++	aw->client = client;
++	mutex_init(&aw->lock);
++	INIT_WORK(&aw->play_work, aw8697_play_work);
++
++	aw->regmap = devm_regmap_init_i2c(client, &aw8697_regmap_config);
++	if (IS_ERR(aw->regmap))
++		return PTR_ERR(aw->regmap);
++
++	aw->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(aw->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(aw->reset_gpio),
++				     "failed to get reset gpio\n");
++
++	/* hardware reset: low, then high */
++	gpiod_set_value_cansleep(aw->reset_gpio, 0);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(aw->reset_gpio, 1);
++	usleep_range(3500, 4000);
++
++	ret = regmap_read(aw->regmap, AW8697_REG_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read chip id\n");
++	if (id != AW8697_CHIPID)
++		return dev_err_probe(dev, -ENODEV, "unexpected chip id 0x%02x\n", id);
++
++	/* software reset */
++	regmap_write(aw->regmap, AW8697_REG_ID, 0xaa);
++	usleep_range(3000, 3500);
++
++	aw8697_base_init(aw);
++
++	aw->input = devm_input_allocate_device(dev);
++	if (!aw->input)
++		return -ENOMEM;
++
++	aw->input->name = "aw8697-haptics";
++	aw->input->id.bustype = BUS_I2C;
++	aw->input->close = aw8697_close;
++	input_set_drvdata(aw->input, aw);
++	input_set_capability(aw->input, EV_FF, FF_RUMBLE);
++
++	ret = input_ff_create_memless(aw->input, NULL, aw8697_play_effect);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to create ff device\n");
++
++	ret = input_register_device(aw->input);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to register input device\n");
++
++	i2c_set_clientdata(client, aw);
++	dev_info(dev, "AW8697 haptics ready\n");
++	return 0;
++}
++
++static void aw8697_remove(struct i2c_client *client)
++{
++	struct aw8697 *aw = i2c_get_clientdata(client);
++
++	cancel_work_sync(&aw->play_work);
++	mutex_lock(&aw->lock);
++	aw8697_stop(aw);
++	mutex_unlock(&aw->lock);
++}
++
++static const struct of_device_id aw8697_of_match[] = {
++	{ .compatible = "awinic,aw8697" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, aw8697_of_match);
++
++static const struct i2c_device_id aw8697_id[] = {
++	{ "aw8697" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, aw8697_id);
++
++static struct i2c_driver aw8697_driver = {
++	.driver = {
++		.name = "aw8697-haptics",
++		.of_match_table = aw8697_of_match,
++	},
++	.probe = aw8697_probe,
++	.remove = aw8697_remove,
++	.id_table = aw8697_id,
++};
++module_i2c_driver(aw8697_driver);
++
++MODULE_DESCRIPTION("Awinic AW8697 haptics driver (minimal rumble)");
++MODULE_LICENSE("GPL");

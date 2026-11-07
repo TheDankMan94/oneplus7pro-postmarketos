@@ -1,0 +1,38 @@
+From: OnePlus 7 Pro bring-up <noreply@localhost>
+Subject: [PATCH] power: reset: msm-poweroff: add qcom,poweroff-only and run first
+
+On the OnePlus 7 Pro, power off through PSCI SYSTEM_OFF ends in a PMIC hard
+reset: the bootloader reports androidboot.startupmode=hard_reset and the
+phone starts again. The PMIC power key driver already sets the PS_HOLD reset
+type to shutdown before power off, so pulling PS_HOLD low directly (what the
+downstream kernel does) switches the phone off.
+
+Add a "qcom,poweroff-only" property so a board can use PS_HOLD for power off
+without taking over restart from PSCI, and run the PS_HOLD power off handler
+before the legacy PSCI pm_power_off hook.
+---
+--- a/drivers/power/reset/msm-poweroff.c
++++ b/drivers/power/reset/msm-poweroff.c
+@@ -29,11 +29,19 @@
+ 	if (IS_ERR(msm_ps_hold))
+ 		return PTR_ERR(msm_ps_hold);
+ 
+-	devm_register_sys_off_handler(&pdev->dev, SYS_OFF_MODE_RESTART,
+-				      128, do_msm_poweroff, NULL);
++	/*
++	 * On some boards (OnePlus 7 Pro) PSCI SYSTEM_OFF ends in a PMIC hard
++	 * reset instead of a shutdown, while pulling PS_HOLD low directly
++	 * shuts the PMIC down as the PS_HOLD reset type was set by the
++	 * PMIC power key driver. Such boards keep PSCI for restart and only
++	 * use PS_HOLD for power off.
++	 */
++	if (!of_property_read_bool(pdev->dev.of_node, "qcom,poweroff-only"))
++		devm_register_sys_off_handler(&pdev->dev, SYS_OFF_MODE_RESTART,
++					      128, do_msm_poweroff, NULL);
+ 
+ 	devm_register_sys_off_handler(&pdev->dev, SYS_OFF_MODE_POWER_OFF,
+-				      SYS_OFF_PRIO_DEFAULT, do_msm_poweroff,
++				      SYS_OFF_PRIO_HIGH, do_msm_poweroff,
+ 				      NULL);
+ 
+ 	return 0;
